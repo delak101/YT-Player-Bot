@@ -1,0 +1,15 @@
+Discord Bot Invite Link
+=========================
+Client ID: 1388868051222532149
+Invite Link: https://discord.com/api/oauth2/authorize?client_id=1388868051222532149&permissions=37080064&scope=bot
+
+Permissions:
+- View Channels
+- Send Messages
+- Embed Links
+- Attach Files
+- Read Message History
+- Use External Emojis
+- Connect
+- Speak
+- Use Voice Activity
