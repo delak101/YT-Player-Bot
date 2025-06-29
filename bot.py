@@ -4,7 +4,18 @@ import yt_dlp
 import asyncio
 import os
 import random
+import ssl
+import urllib3
 from typing import Optional
+
+# Disable SSL warnings and create SSL context that doesn't verify certificates
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
+
+# Set environment variable to disable SSL verification
+os.environ['PYTHONHTTPSVERIFY'] = '0'
 
 # Bot setup
 intents = discord.Intents.default()
@@ -24,6 +35,20 @@ ytdl_format_options = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
+    'force_ssl': False,
+    'prefer_insecure': True,
+    'socket_timeout': 30,
+    'retries': 3,
+    'fragment_retries': 3,
+    'extractor_args': {
+        'youtube': {
+            'skip': ['dash', 'hls'],
+            'player_client': ['android', 'web']
+        }
+    },
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
 }
 
 ffmpeg_options = {
@@ -45,7 +70,68 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        
+        # Define multiple ytdl configurations for fallback
+        configs = [
+            # Config 1: Standard with SSL bypass
+            {
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'quiet': True,
+                'no_warnings': True,
+                'force_ssl': False,
+                'prefer_insecure': True,
+                'socket_timeout': 30,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android']
+                    }
+                }
+            },
+            # Config 2: Mobile client
+            {
+                'format': 'worst',
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'quiet': True,
+                'no_warnings': True,
+                'force_ssl': False,
+                'prefer_insecure': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android', 'android_music']
+                    }
+                }
+            },
+            # Config 3: Minimal settings
+            {
+                'format': 'worstaudio/worst',
+                'noplaylist': True,
+                'nocheckcertificate': True,
+                'quiet': True,
+                'no_warnings': True,
+                'force_ssl': False,
+                'prefer_insecure': True,
+                'ignore_errors': True
+            }
+        ]
+        
+        data = None
+        last_error = None
+        
+        for i, config in enumerate(configs):
+            try:
+                temp_ytdl = yt_dlp.YoutubeDL(config)
+                data = await loop.run_in_executor(None, lambda: temp_ytdl.extract_info(url, download=not stream))
+                break  # Success, exit loop
+            except Exception as e:
+                last_error = e
+                print(f"Config {i+1} failed: {str(e)}")
+                continue
+        
+        if not data:
+            raise Exception(f"All extraction methods failed. Last error: {str(last_error)}")
         
         if 'entries' in data:
             # Take first item from a playlist
@@ -151,7 +237,79 @@ class MusicBot(commands.Cog):
         try:
             # Show that bot is processing
             async with ctx.typing():
-                player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
+                # Try to get the player with multiple fallback methods
+                player = None
+                error_messages = []
+                
+                # Method 1: Try with search prefix for better compatibility
+                search_url = url
+                if not url.startswith(('http', 'www', 'youtube.com', 'youtu.be')):
+                    search_url = f"ytsearch:{url}"
+                
+                try:
+                    player = await YTDLSource.from_url(search_url, loop=self.bot.loop, stream=True)
+                except Exception as e1:
+                    error_messages.append(f"Primary method failed: {str(e1)}")
+                    
+                    # Method 2: Try with direct URL if it was a search
+                    if search_url != url:
+                        try:
+                            player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
+                        except Exception as e2:
+                            error_messages.append(f"Direct URL failed: {str(e2)}")
+                    
+                    # Method 3: Last resort with simple youtube search
+                    if not player:
+                        try:
+                            simple_search = f"ytsearch1:{url.replace('https://youtube.com/watch?v=', '').replace('https://youtu.be/', '')}"
+                            
+                            # Ultra-minimal ytdl config
+                            minimal_config = {
+                                'format': 'worst',
+                                'quiet': True,
+                                'no_warnings': True,
+                                'nocheckcertificate': True,
+                                'force_ssl': False,
+                                'prefer_insecure': True,
+                                'ignore_errors': True,
+                                'socket_timeout': 10,
+                                'extractor_args': {
+                                    'youtube': {
+                                        'player_client': ['android']
+                                    }
+                                }
+                            }
+                            
+                            minimal_ytdl = yt_dlp.YoutubeDL(minimal_config)
+                            loop = self.bot.loop
+                            data = await loop.run_in_executor(None, lambda: minimal_ytdl.extract_info(simple_search, download=False))
+                            
+                            if data and 'entries' in data and len(data['entries']) > 0:
+                                entry = data['entries'][0]
+                                player = YTDLSource(discord.FFmpegPCMAudio(entry['url'], **ffmpeg_options), data=entry)
+                            
+                        except Exception as e3:
+                            error_messages.append(f"Minimal search failed: {str(e3)}")
+                
+                if not player:
+                    # Show user-friendly error message
+                    embed = discord.Embed(
+                        title="❌ Failed to Play Song",
+                        description="Unable to extract audio from the requested source.",
+                        color=0xff0000
+                    )
+                    embed.add_field(
+                        name="💡 Suggestions:",
+                        value="• Try searching by song name instead of URL\n• Use a different YouTube video\n• Check if the video is available in your region\n• Try again in a few minutes",
+                        inline=False
+                    )
+                    embed.add_field(
+                        name="🔧 Technical Info:",
+                        value=f"```{error_messages[-1][:100]}...```" if error_messages else "No detailed error available",
+                        inline=False
+                    )
+                    await ctx.send(embed=embed)
+                    return
                 
                 # If nothing is currently playing, play immediately
                 if not self.is_playing and not ctx.voice_client.is_playing():
