@@ -3,6 +3,7 @@ from discord.ext import commands
 import yt_dlp
 import asyncio
 import os
+import random
 from typing import Optional
 
 # Bot setup
@@ -60,6 +61,7 @@ class MusicBot(commands.Cog):
         self.queue = []
         self.current_song = None
         self.is_playing = False
+        self.loop_mode = False
 
     @commands.command(name='join', help='Bot joins your voice channel')
     async def join(self, ctx):
@@ -84,9 +86,58 @@ class MusicBot(commands.Cog):
             self.queue.clear()
             self.current_song = None
             self.is_playing = False
+            self.loop_mode = False
             await ctx.send("Disconnected from voice channel!")
         else:
             await ctx.send("I'm not connected to a voice channel!")
+
+    async def play_next(self, ctx):
+        """Play the next song in the queue"""
+        if self.queue:
+            next_song = self.queue.pop(0)
+            self.current_song = next_song['player']
+            self.is_playing = True
+            
+            # Create embed for next song
+            embed = discord.Embed(
+                title="🎵 Now Playing",
+                description=f"**{next_song['player'].title}**",
+                color=0x00ff00
+            )
+            
+            if next_song['player'].thumbnail:
+                embed.set_thumbnail(url=next_song['player'].thumbnail)
+            
+            if next_song['player'].duration:
+                minutes, seconds = divmod(next_song['player'].duration, 60)
+                embed.add_field(name="Duration", value=f"{int(minutes):02d}:{int(seconds):02d}", inline=True)
+            
+            embed.add_field(name="Requested by", value=next_song['requester'], inline=True)
+            embed.add_field(name="Queue Position", value=f"Playing now", inline=True)
+            
+            # Play with callback to play next song when finished
+            ctx.voice_client.play(next_song['player'], after=lambda e: asyncio.run_coroutine_threadsafe(self.song_finished(ctx, e), self.bot.loop))
+            
+            await ctx.send(embed=embed)
+        else:
+            self.is_playing = False
+            self.current_song = None
+            await ctx.send("🎵 Queue is empty! Add more songs with `!play <song>`")
+
+    async def song_finished(self, ctx, error):
+        """Called when a song finishes playing"""
+        if error:
+            print(f'Player error: {error}')
+        
+        if self.loop_mode and self.current_song:
+            # If loop mode is on, add current song back to the beginning of queue
+            self.queue.insert(0, {
+                'player': self.current_song,
+                'requester': "Loop mode"
+            })
+        
+        # Play next song
+        await self.play_next(ctx)
 
     @commands.command(name='play', help='Play a song from YouTube')
     async def play(self, ctx, *, url):
@@ -102,28 +153,57 @@ class MusicBot(commands.Cog):
             async with ctx.typing():
                 player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
                 
-                # Create embed for song info
-                embed = discord.Embed(
-                    title="🎵 Now Playing",
-                    description=f"**{player.title}**",
-                    color=0x00ff00
-                )
-                
-                if player.thumbnail:
-                    embed.set_thumbnail(url=player.thumbnail)
-                
-                if player.duration:
-                    minutes, seconds = divmod(player.duration, 60)
-                    embed.add_field(name="Duration", value=f"{int(minutes):02d}:{int(seconds):02d}", inline=True)
-                
-                embed.add_field(name="Requested by", value=ctx.author.mention, inline=True)
-                
-                # Play the audio
-                ctx.voice_client.play(player, after=lambda e: print(f'Player error: {e}') if e else None)
-                self.current_song = player
-                self.is_playing = True
-                
-                await ctx.send(embed=embed)
+                # If nothing is currently playing, play immediately
+                if not self.is_playing and not ctx.voice_client.is_playing():
+                    self.current_song = player
+                    self.is_playing = True
+                    
+                    # Create embed for song info
+                    embed = discord.Embed(
+                        title="🎵 Now Playing",
+                        description=f"**{player.title}**",
+                        color=0x00ff00
+                    )
+                    
+                    if player.thumbnail:
+                        embed.set_thumbnail(url=player.thumbnail)
+                    
+                    if player.duration:
+                        minutes, seconds = divmod(player.duration, 60)
+                        embed.add_field(name="Duration", value=f"{int(minutes):02d}:{int(seconds):02d}", inline=True)
+                    
+                    embed.add_field(name="Requested by", value=ctx.author.mention, inline=True)
+                    
+                    # Play the audio with callback for queue management
+                    ctx.voice_client.play(player, after=lambda e: asyncio.run_coroutine_threadsafe(self.song_finished(ctx, e), self.bot.loop))
+                    
+                    await ctx.send(embed=embed)
+                else:
+                    # Add to queue
+                    queue_item = {
+                        'player': player,
+                        'requester': ctx.author.mention
+                    }
+                    self.queue.append(queue_item)
+                    
+                    # Create embed for queued song
+                    embed = discord.Embed(
+                        title="➕ Added to Queue",
+                        description=f"**{player.title}**",
+                        color=0x0099ff
+                    )
+                    
+                    if player.thumbnail:
+                        embed.set_thumbnail(url=player.thumbnail)
+                    
+                    if player.duration:
+                        minutes, seconds = divmod(player.duration, 60)
+                        embed.add_field(name="Duration", value=f"{int(minutes):02d}:{int(seconds):02d}", inline=True)
+                    
+                    embed.add_field(name="Requested by", value=ctx.author.mention, inline=True)
+                    embed.add_field(name="Queue Position", value=f"#{len(self.queue)}", inline=True)
+                    
+                    await ctx.send(embed=embed)
                 
         except Exception as e:
             await ctx.send(f"An error occurred: {str(e)}")
@@ -150,7 +230,8 @@ class MusicBot(commands.Cog):
             ctx.voice_client.stop()
             self.current_song = None
             self.is_playing = False
-            await ctx.send("⏹️ Music stopped!")
+            self.queue.clear()  # Clear the queue when stopping
+            await ctx.send("⏹️ Music stopped and queue cleared!")
         else:
             await ctx.send("No music is currently playing!")
 
@@ -182,9 +263,104 @@ class MusicBot(commands.Cog):
             if self.current_song.thumbnail:
                 embed.set_thumbnail(url=self.current_song.thumbnail)
             
+            if len(self.queue) > 0:
+                embed.add_field(name="Up Next", value=f"{len(self.queue)} song(s) in queue", inline=True)
+            
+            if self.loop_mode:
+                embed.add_field(name="Loop Mode", value="✅ Enabled", inline=True)
+            
             await ctx.send(embed=embed)
         else:
             await ctx.send("No music is currently playing!")
+
+    @commands.command(name='queue', aliases=['q'], help='Show the current queue')
+    async def show_queue(self, ctx):
+        if not self.queue:
+            if self.current_song and self.is_playing:
+                embed = discord.Embed(
+                    title="📋 Music Queue",
+                    description="Queue is empty, but music is currently playing.\nUse `!np` to see current song.",
+                    color=0x0099ff
+                )
+            else:
+                embed = discord.Embed(
+                    title="📋 Music Queue",
+                    description="Queue is empty. Add songs with `!play <song>`",
+                    color=0x0099ff
+                )
+            await ctx.send(embed=embed)
+            return
+        
+        embed = discord.Embed(
+            title="📋 Music Queue",
+            color=0x0099ff
+        )
+        
+        queue_text = ""
+        for i, item in enumerate(self.queue[:10], 1):  # Show first 10 songs
+            duration_text = ""
+            if item['player'].duration:
+                minutes, seconds = divmod(item['player'].duration, 60)
+                duration_text = f" ({int(minutes):02d}:{int(seconds):02d})"
+            
+            queue_text += f"**{i}.** {item['player'].title}{duration_text}\n   *Requested by {item['requester']}*\n\n"
+        
+        if len(self.queue) > 10:
+            queue_text += f"... and {len(self.queue) - 10} more songs"
+        
+        embed.description = queue_text
+        embed.add_field(name="Total Songs", value=str(len(self.queue)), inline=True)
+        
+        if self.current_song and self.is_playing:
+            embed.add_field(name="Now Playing", value=self.current_song.title, inline=True)
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='skip', aliases=['next'], help='Skip the current song')
+    async def skip(self, ctx):
+        if ctx.voice_client and ctx.voice_client.is_playing():
+            ctx.voice_client.stop()  # This will trigger the after callback and play next song
+            await ctx.send("⏭️ Skipped current song!")
+        else:
+            await ctx.send("No music is currently playing!")
+
+    @commands.command(name='clear', help='Clear the queue')
+    async def clear_queue(self, ctx):
+        if self.queue:
+            cleared_count = len(self.queue)
+            self.queue.clear()
+            await ctx.send(f"🗑️ Cleared {cleared_count} song(s) from the queue!")
+        else:
+            await ctx.send("Queue is already empty!")
+
+    @commands.command(name='remove', help='Remove a song from queue by position')
+    async def remove_from_queue(self, ctx, position: int):
+        if not self.queue:
+            await ctx.send("Queue is empty!")
+            return
+        
+        if position < 1 or position > len(self.queue):
+            await ctx.send(f"Invalid position! Queue has {len(self.queue)} songs.")
+            return
+        
+        removed_song = self.queue.pop(position - 1)
+        await ctx.send(f"🗑️ Removed **{removed_song['player'].title}** from position {position}")
+
+    @commands.command(name='shuffle', help='Shuffle the queue')
+    async def shuffle_queue(self, ctx):
+        if len(self.queue) < 2:
+            await ctx.send("Need at least 2 songs in queue to shuffle!")
+            return
+        
+        random.shuffle(self.queue)
+        await ctx.send(f"🔀 Shuffled {len(self.queue)} songs in the queue!")
+
+    @commands.command(name='loop', help='Toggle loop mode for current song')
+    async def toggle_loop(self, ctx):
+        self.loop_mode = not self.loop_mode
+        status = "enabled" if self.loop_mode else "disabled"
+        emoji = "🔁" if self.loop_mode else "❌"
+        await ctx.send(f"{emoji} Loop mode {status}!")
 
 @bot.event
 async def on_ready():
