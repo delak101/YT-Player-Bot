@@ -22,32 +22,40 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# YouTube DL options
+# YouTube DL options with enhanced bot detection bypass
 ytdl_format_options = {
-    'format': 'bestaudio/best',
+    'format': 'worstaudio/worst',  # Use worst quality for better compatibility
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
-    'ignoreerrors': False,
+    'ignoreerrors': True,
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'auto',
+    'default_search': 'ytsearch',  # Always search instead of direct URLs
     'source_address': '0.0.0.0',
     'force_ssl': False,
     'prefer_insecure': True,
-    'socket_timeout': 30,
-    'retries': 3,
-    'fragment_retries': 3,
+    'socket_timeout': 10,
+    'retries': 2,
+    'fragment_retries': 2,
+    'skip_unavailable_fragments': True,
     'extractor_args': {
         'youtube': {
             'skip': ['dash', 'hls'],
-            'player_client': ['android', 'web']
+            'player_client': ['android_music', 'android', 'web'],
+            'player_skip': ['configs', 'webpage']
         }
     },
     'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 11; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.66 Mobile Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'cross-site',
+        'Referer': 'https://www.youtube.com/'
     }
 }
 
@@ -241,52 +249,38 @@ class MusicBot(commands.Cog):
                 player = None
                 error_messages = []
                 
-                # Method 1: Try with search prefix for better compatibility
-                search_url = url
-                if not url.startswith(('http', 'www', 'youtube.com', 'youtu.be')):
-                    search_url = f"ytsearch:{url}"
+                # Always convert to search query to avoid bot detection
+                search_query = url
+                
+                # Convert URLs to search queries
+                if 'youtube.com/watch?v=' in url:
+                    # Extract video ID and search for it
+                    video_id = url.split('watch?v=')[1].split('&')[0]
+                    search_query = f"ytsearch:{video_id}"
+                elif 'youtu.be/' in url:
+                    # Extract video ID from short URL
+                    video_id = url.split('youtu.be/')[1].split('?')[0]
+                    search_query = f"ytsearch:{video_id}"
+                elif not url.startswith(('http', 'www')):
+                    # Regular search query
+                    search_query = f"ytsearch:{url}"
+                else:
+                    # Any other URL, try to search for it
+                    search_query = f"ytsearch:{url}"
                 
                 try:
-                    player = await YTDLSource.from_url(search_url, loop=self.bot.loop, stream=True)
+                    player = await YTDLSource.from_url(search_query, loop=self.bot.loop, stream=True)
                 except Exception as e1:
-                    error_messages.append(f"Primary method failed: {str(e1)}")
+                    error_messages.append(f"Search method failed: {str(e1)}")
                     
-                    # Method 2: Try with direct URL if it was a search
-                    if search_url != url:
-                        try:
-                            player = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
-                        except Exception as e2:
-                            error_messages.append(f"Direct URL failed: {str(e2)}")
-                    
-                    # Method 3: Last resort with simple youtube search
+                    # Fallback: Try simple search without video ID
                     if not player:
                         try:
-                            simple_search = f"ytsearch1:{url.replace('https://youtube.com/watch?v=', '').replace('https://youtu.be/', '')}"
+                            # Extract just the essence for search
+                            clean_query = url.replace('https://youtube.com/watch?v=', '').replace('https://youtu.be/', '').replace('http://', '').replace('https://', '')
+                            fallback_search = f"ytsearch1:{clean_query}"
                             
-                            # Ultra-minimal ytdl config
-                            minimal_config = {
-                                'format': 'worst',
-                                'quiet': True,
-                                'no_warnings': True,
-                                'nocheckcertificate': True,
-                                'force_ssl': False,
-                                'prefer_insecure': True,
-                                'ignore_errors': True,
-                                'socket_timeout': 10,
-                                'extractor_args': {
-                                    'youtube': {
-                                        'player_client': ['android']
-                                    }
-                                }
-                            }
-                            
-                            minimal_ytdl = yt_dlp.YoutubeDL(minimal_config)
-                            loop = self.bot.loop
-                            data = await loop.run_in_executor(None, lambda: minimal_ytdl.extract_info(simple_search, download=False))
-                            
-                            if data and 'entries' in data and len(data['entries']) > 0:
-                                entry = data['entries'][0]
-                                player = YTDLSource(discord.FFmpegPCMAudio(entry['url'], **ffmpeg_options), data=entry)
+                            player = await YTDLSource.from_url(fallback_search, loop=self.bot.loop, stream=True)
                             
                         except Exception as e3:
                             error_messages.append(f"Minimal search failed: {str(e3)}")
